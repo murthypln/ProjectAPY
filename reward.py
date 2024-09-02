@@ -329,7 +329,7 @@ def calculate_aggregate_apy(
 
     pct_yield = wei_div(pct_yield, initial_balance)
     aggregate_apy = int(
-        pct_yield // timesteps
+        pct_yield /  timesteps
     )  # for simplicity each timestep is a day in the simulator
 
     return aggregate_apy

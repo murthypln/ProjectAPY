@@ -24,9 +24,11 @@ from typing import Dict, Literal, Union
 import bittensor as bt
 import numpy as np
 import web3.constants
-from pydantic import BaseModel, Field, PrivateAttr, root_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from web3 import Web3
 from web3.contract import Contract
+from sklearn.ensemble import RandomForestRegressor
+
 
 from constants import *
 from ethmath import wei_div, wei_mul
@@ -47,37 +49,34 @@ class POOL_TYPES(str, Enum):
 
 
 class BasePoolModel(BaseModel):
-    """This model will primarily be used for synthetic requests"""
+    pool_model_disc: Literal['SYNTHETIC'] = Field(default='SYNTHETIC', description="Pool model description")
+    pool_id: str = Field(..., description="UID of pool")
+    pool_type: Literal['SYNTHETIC'] = Field(default='SYNTHETIC', description="Type of pool")
+    base_rate: int = Field(..., description="Base interest rate")
+    base_slope: int = Field(..., description="Base slope")
+    kink_slope: int = Field(..., description="Kink slope")
+    optimal_util_rate: int = Field(..., description="Optimal utilization rate")
+    borrow_amount: int = Field(..., description="Borrow amount")
+    reserve_size: int = Field(..., description="Reserve size")
 
-    pool_model_disc: Literal['SYNTHETIC'] = Field(default='SYNTHETIC', description="pool type discriminator")
-    pool_id: str = Field(..., description="uid of pool")
-    pool_type: POOL_TYPES = Field(
-        default=POOL_TYPES.SYNTHETIC, const=True, description="type of pool"
-    )
-    base_rate: int = Field(..., description="base interest rate")
-    base_slope: int = Field(..., description="base interest rate slope")
-    kink_slope: int = Field(..., description="kink slope")
-    optimal_util_rate: int = Field(..., description="optimal utilisation rate")
-    borrow_amount: int = Field(..., description="borrow amount in wei")
-    reserve_size: int = Field(..., description="pool reserve size in wei")
-
-    @root_validator
+    @model_validator(mode='after')
     def check_params(cls, values):
-        if len(values.get("pool_id")) <= 0:
-            raise ValueError("pool id is empty")
-        if values.get("base_rate") < 0:
-            raise ValueError("base rate is negative")
-        if values.get("base_slope") < 0:
-            raise ValueError("base slope is negative")
-        if values.get("kink_slope") < 0:
-            raise ValueError("kink slope is negative")
-        if values.get("optimal_util_rate") < 0:
-            raise ValueError("optimal utilization rate is negative")
-        if values.get("borrow_amount") < 0:
-            raise ValueError("borrow amount is negative")
-        if values.get("reserve_size") < 0:
-            raise ValueError("reserve size is negative")
+        if len(values.pool_id) <= 0:
+            raise ValueError("Pool ID is empty")
+        if values.base_rate < 0:
+            raise ValueError("Base rate is negative")
+        if values.base_slope < 0:
+            raise ValueError("Base slope is negative")
+        if values.kink_slope < 0:
+            raise ValueError("Kink slope is negative")
+        if values.optimal_util_rate < 0:
+            raise ValueError("Optimal utilization rate is negative")
+        if values.borrow_amount < 0:
+            raise ValueError("Borrow amount is negative")
+        if values.reserve_size < 0:
+            raise ValueError("Reserve size is negative")
         return values
+
 
 
 class BasePool(BasePoolModel):
@@ -130,29 +129,30 @@ class ChainBasedPoolModel(BaseModel):
         contract_address: (str),
     """
 
-    pool_model_disc: Literal['CHAIN'] = Field(default='CHAIN', description="pool type discriminator")
-    pool_id: str = Field(..., description="uid of pool")
-    pool_type: POOL_TYPES = Field(..., description="type of pool")
+    pool_model_disc: Literal['CHAIN'] = Field(default='CHAIN', description="Pool type discriminator")
+    pool_id: str = Field(..., description="UID of pool")
+    pool_type: POOL_TYPES = Field(..., description="Type of pool")
     user_address: str = Field(
         default=web3.constants.ADDRESS_ZERO,
-        description="address of the 'user' - used for various on-chain calls",
+        description="Address of the 'user' - used for various on-chain calls",
     )
     contract_address: str = Field(
-        default=web3.constants.ADDRESS_ZERO, description="address of contract to call"
+        default=web3.constants.ADDRESS_ZERO, description="Address of contract to call"
     )
 
     _initted: bool = PrivateAttr(False)
 
-    @root_validator
+    @model_validator(mode='after')
     def check_params(cls, values):
-        if len(values.get("pool_id")) <= 0:
-            raise ValueError("pool id is empty")
-        if not Web3.is_address(values.get("contract_address")):
-            raise ValueError("pool address is invalid!")
-        if not Web3.is_address(values.get("user_address")):
-            raise ValueError("user address is invalid!")
+        if len(values.pool_id) <= 0:
+            raise ValueError("Pool ID is empty")
+        if not Web3.is_address(values.contract_address):
+            raise ValueError("Pool address is invalid!")
+        if not Web3.is_address(values.user_address):
+            raise ValueError("User address is invalid!")
 
         return values
+
 
     def pool_init(self, **args):
         raise NotImplementedError("pool_init() has not been implemented!")
@@ -183,9 +183,7 @@ class PoolFactory:
 class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
     """This class defines the default pool type for Aave"""
 
-    pool_type: POOL_TYPES = Field(
-        default=POOL_TYPES.AAVE, const=True, description="type of pool"
-    )
+    pool_type: Literal[POOL_TYPES.AAVE] = POOL_TYPES.AAVE
 
     _atoken_contract: Contract = PrivateAttr()
     _pool_contract: Contract = PrivateAttr()
@@ -215,7 +213,7 @@ class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
             other._underlying_asset_address,
         )
 
-    def pool_init(self, web3_provider: Web3):
+    def pool_init(self, user_addr: str, web3_provider: Web3):
         try:
             assert web3_provider.is_connected()
         except Exception as err:
@@ -223,54 +221,55 @@ class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
             bt.logging.error(err)
 
         try:
-            atoken_abi_file_path = Path(__file__).parent / "../abi/AToken.json"
-            atoken_abi_file = atoken_abi_file_path.open()
-            atoken_abi = json.load(atoken_abi_file)
-            atoken_abi_file.close()
-            atoken_contract = web3_provider.eth.contract(
-                abi=atoken_abi, decode_tuples=True
+            silo_strategy_abi_file_path = (
+                Path(__file__).parent / "../abi/SturdySiloStrategy.json"
             )
-            self._atoken_contract = retry_with_backoff(
-                atoken_contract,
-                address=self.contract_address,
+            with silo_strategy_abi_file_path.open() as silo_strategy_abi_file:
+                silo_strategy_abi = json.load(silo_strategy_abi_file)
+
+            silo_strategy_contract = web3_provider.eth.contract(
+                abi=silo_strategy_abi, decode_tuples=True
             )
-
-            pool_abi_file_path = Path(__file__).parent / "../abi/Pool.json"
-            pool_abi_file = pool_abi_file_path.open()
-            pool_abi = json.load(pool_abi_file)
-            pool_abi_file.close()
-
-            atoken_contract = self._atoken_contract
-            pool_address = retry_with_backoff(atoken_contract.functions.POOL().call)
-
-            pool_contract = web3_provider.eth.contract(abi=pool_abi, decode_tuples=True)
-            self._pool_contract = retry_with_backoff(
-                pool_contract, address=pool_address
+            self._silo_strategy_contract = retry_with_backoff(
+                silo_strategy_contract, address=self.contract_address
             )
 
-            self._underlying_asset_address = retry_with_backoff(
-                self._atoken_contract.functions.UNDERLYING_ASSET_ADDRESS().call
+            pair_abi_file_path = Path(__file__).parent / "../abi/SturdyPair.json"
+            with pair_abi_file_path.open() as pair_abi_file:
+                pair_abi = json.load(pair_abi_file)
+
+            pair_contract_address = retry_with_backoff(
+                self._silo_strategy_contract.functions.pair().call
+            )
+            pair_contract = web3_provider.eth.contract(abi=pair_abi, decode_tuples=True)
+            self._pair_contract = retry_with_backoff(
+                pair_contract, address=pair_contract_address
             )
 
-            erc20_abi_file_path = Path(__file__).parent / "../abi/IERC20.json"
-            erc20_abi_file = erc20_abi_file_path.open()
-            erc20_abi = json.load(erc20_abi_file)
-            erc20_abi_file.close()
-
-            underlying_asset_contract = web3_provider.eth.contract(
-                abi=erc20_abi, decode_tuples=True
+            rate_model_abi_file_path = (
+                Path(__file__).parent / "../abi/VariableInterestRate.json"
             )
-            self._underlying_asset_contract = retry_with_backoff(
-                underlying_asset_contract, address=self._underlying_asset_address
+            with rate_model_abi_file_path.open() as rate_model_abi_file:
+                rate_model_abi = json.load(rate_model_abi_file)
+
+            rate_model_contract_address = retry_with_backoff(
+                self._pair_contract.functions.rateContract().call
+            )
+            rate_model_contract = web3_provider.eth.contract(
+                abi=rate_model_abi, decode_tuples=True
+            )
+            self._rate_model_contract = retry_with_backoff(
+                rate_model_contract, address=rate_model_contract_address
             )
 
             self._initted = True
 
-        except Exception as err:
-            bt.logging.error("Failed to load contract!")
-            bt.logging.error(err)
+        except Exception as e:
+            bt.logging.error(e)
+
 
         return web3_provider
+
 
     def sync(self, web3_provider: Web3):
         """Syncs with chain"""
@@ -303,7 +302,7 @@ class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
             )
 
             reserve_strat_abi_file_path = (
-                    Path(__file__).parent / "../abi/IReserveInterestRateStrategy.json"
+                Path(__file__).parent / "../abi/IReserveInterestRateStrategy.json"
             )
             reserve_strat_abi_file = reserve_strat_abi_file_path.open()
             reserve_strat_abi = json.load(reserve_strat_abi_file)
@@ -316,7 +315,7 @@ class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
             )
 
             stable_debt_token_abi_file_path = (
-                    Path(__file__).parent / "../abi/IStableDebtToken.json"
+                Path(__file__).parent / "../abi/IStableDebtToken.json"
             )
             stable_debt_token_abi_file = stable_debt_token_abi_file_path.open()
             stable_debt_token_abi = json.load(stable_debt_token_abi_file)
@@ -340,7 +339,7 @@ class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
             )
 
             variable_debt_token_abi_file_path = (
-                    Path(__file__).parent / "../abi/IVariableDebtToken.json"
+                Path(__file__).parent / "../abi/IVariableDebtToken.json"
             )
             variable_debt_token_abi_file = variable_debt_token_abi_file_path.open()
             variable_debt_token_abi = json.load(variable_debt_token_abi_file)
@@ -420,9 +419,7 @@ class AaveV3DefaultInterestRatePool(ChainBasedPoolModel):
 
 class VariableInterestSturdySiloStrategy(ChainBasedPoolModel):
 
-    pool_type: POOL_TYPES = Field(
-        POOL_TYPES.STURDY_SILO, const=True, description="type of pool"
-    )
+    pool_type: Literal[POOL_TYPES.AAVE] = POOL_TYPES.AAVE
 
     _silo_strategy_contract: Contract = PrivateAttr()
     _pair_contract: Contract = PrivateAttr()
@@ -457,7 +454,7 @@ class VariableInterestSturdySiloStrategy(ChainBasedPoolModel):
 
         try:
             silo_strategy_abi_file_path = (
-                    Path(__file__).parent / "../abi/SturdySiloStrategy.json"
+                Path(__file__).parent / "../abi/SturdySiloStrategy.json"
             )
             silo_strategy_abi_file = silo_strategy_abi_file_path.open()
             silo_strategy_abi = json.load(silo_strategy_abi_file)
@@ -484,7 +481,7 @@ class VariableInterestSturdySiloStrategy(ChainBasedPoolModel):
             )
 
             rate_model_abi_file_path = (
-                    Path(__file__).parent / "../abi/VariableInterestRate.json"
+                Path(__file__).parent / "../abi/VariableInterestRate.json"
             )
             rate_model_abi_file = rate_model_abi_file_path.open()
             rate_model_abi = json.load(rate_model_abi_file)
@@ -496,8 +493,10 @@ class VariableInterestSturdySiloStrategy(ChainBasedPoolModel):
             rate_model_contract = web3_provider.eth.contract(
                 abi=rate_model_abi, decode_tuples=True
             )
+            
+
             self._rate_model_contract = retry_with_backoff(
-                rate_model_contract, address=rate_model_contract_address
+            rate_model_contract, address=rate_model_contract_address
             )
 
             self._initted = True
@@ -544,8 +543,8 @@ class VariableInterestSturdySiloStrategy(ChainBasedPoolModel):
     def supply_rate(self, amount: int) -> int:
         delta = amount - self._curr_deposit_amount
         """Returns supply rate given new deposit amount"""
-        util_rate = (self._util_prec * self._totalBorrow.amount) // (
-                self._totalAsset.amount + delta
+        util_rate = (self._util_prec * self._totalBorrow) // (
+                self._totalAsset + delta
         )
 
         last_update_timestamp = self._current_rate_info.lastTimestamp
@@ -576,41 +575,42 @@ def generate_assets_and_pools(rng_gen=np.random) -> Dict:  # generate pools
     assets_and_pools = {}
 
     pools = [
-        BasePool(
-            pool_id=str(x),
-            pool_type=POOL_TYPES.SYNTHETIC,
-            base_rate=randrange_float(
-                MIN_BASE_RATE, MAX_BASE_RATE, BASE_RATE_STEP, rng_gen=rng_gen
-            ),
-            base_slope=randrange_float(
-                MIN_SLOPE, MAX_SLOPE, SLOPE_STEP, rng_gen=rng_gen
-            ),
-            kink_slope=randrange_float(
-                MIN_KINK_SLOPE, MAX_KINK_SLOPE, SLOPE_STEP, rng_gen=rng_gen
-            ),  # kink rate - kicks in after pool hits optimal util rate
-            optimal_util_rate=randrange_float(
-                MIN_OPTIMAL_RATE,
-                MAX_OPTIMAL_RATE,
-                OPTIMAL_UTIL_STEP,
-                rng_gen=rng_gen,
-            ),  # optimal util rate - after which the kink slope kicks in
-            borrow_amount=int(
-                format_num_prec(
-                    wei_mul(
-                        POOL_RESERVE_SIZE,
-                        randrange_float(
-                            MIN_UTIL_RATE,
-                            MAX_UTIL_RATE,
-                            UTIL_RATE_STEP,
-                            rng_gen=rng_gen,
-                        ),
-                    )
+    BasePool(
+        pool_id=str(x),
+        pool_type="SYNTHETIC",  # Use the string literal directly
+        base_rate=randrange_float(
+            MIN_BASE_RATE, MAX_BASE_RATE, BASE_RATE_STEP, rng_gen=rng_gen
+        ),
+        base_slope=randrange_float(
+            MIN_SLOPE, MAX_SLOPE, SLOPE_STEP, rng_gen=rng_gen
+        ),
+        kink_slope=randrange_float(
+            MIN_KINK_SLOPE, MAX_KINK_SLOPE, SLOPE_STEP, rng_gen=rng_gen
+        ),  # kink rate - kicks in after pool hits optimal util rate
+        optimal_util_rate=randrange_float(
+            MIN_OPTIMAL_RATE,
+            MAX_OPTIMAL_RATE,
+            OPTIMAL_UTIL_STEP,
+            rng_gen=rng_gen,
+        ),  # optimal util rate - after which the kink slope kicks in
+        borrow_amount=int(
+            format_num_prec(
+                wei_mul(
+                    POOL_RESERVE_SIZE,
+                    randrange_float(
+                        MIN_UTIL_RATE,
+                        MAX_UTIL_RATE,
+                        UTIL_RATE_STEP,
+                        rng_gen=rng_gen,
+                    ),
                 )
-            ),  # initial borrowed amount from pool
-            reserve_size=POOL_RESERVE_SIZE,
-        )
-        for x in range(NUM_POOLS)
-    ]
+            )
+        ),  # initial borrowed amount from pool
+        reserve_size=int(POOL_RESERVE_SIZE),  # Ensure reserve_size is an integer
+    )
+    for x in range(NUM_POOLS)
+]
+
 
     pools = {str(pool.pool_id): pool for pool in pools}
 
@@ -624,7 +624,7 @@ def generate_assets_and_pools(rng_gen=np.random) -> Dict:  # generate pools
     return assets_and_pools
 
 
-# generate intial allocations for pools
+# generate initial allocations for pools
 def generate_initial_allocations_for_pools(
         assets_and_pools: Dict, rng_gen=np.random
 ) -> Dict:

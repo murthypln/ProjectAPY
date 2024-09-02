@@ -27,22 +27,30 @@ class RandomForestAllocation:
 
         batch = []
         for pool in assets_and_pools['pools'].values():
-            data = [pool[column] for column in self._columns]
+            data = [pool.get(column, 0) for column in self._columns]
             batch.append(data)
 
         batch = np.array(batch)
-
         batch = self._scaler.transform(batch)
+
         if model == 'new':
             y = self._model.predict(batch)
         else:
             y = self._old_model.predict(batch)
 
-        y = [Decimal(alc) for alc in y.tolist()]
+        # Check if 'monotonic_cst' exists and handle it accordingly
+        if hasattr(self._old_model.estimators_[0], 'monotonic_cst'):
+            y = [self.round_down(alc / sum_y, index) * total_assets for alc in y]
+        else:
+            # Handle the case where 'monotonic_cst' doesn't exist
+            y = [Decimal(alc) for alc in y.tolist()]
+
         sum_y = Decimal(sum(y))
         y = [self.round_down(alc / sum_y, index) * total_assets for alc in y]
         predicted_allocated = {str(i): float(v) for i, v in enumerate(y)}
         return predicted_allocated
+
+
 
     def round_down(self, value, index=10000000000000000):
         return ((Decimal(str(index)) * value) // Decimal('1')) / Decimal(str(index))
